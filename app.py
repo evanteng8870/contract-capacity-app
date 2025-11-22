@@ -399,13 +399,25 @@ st.set_page_config(page_title="最適契約容量試算 v5.2.1", layout="wide")
 st.markdown(
     """
     <style>
-    /* 只在手機 / 小螢幕顯示提示文字 */
-    @media (max-width: 768px) {
-        button[data-testid="collapsedControl"]::after {
-            content: " 切換輸入區";    /* 這就是出現在 ≪ / ≫ 後面的字 */
-            font-size: 0.75rem;
+    /* 只在小螢幕顯示提示文字 */
+    @media (max-width: 1024px) {
+
+        /* 先多 cover 幾種可能的 testid */
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapseButton"] {
+            position: relative;
+            padding-right: 64px;   /* 給右邊一點空間放文字 */
+        }
+
+        [data-testid="collapsedControl"]::after,
+        [data-testid="stSidebarCollapseButton"]::after {
+            content: " 切換輸入區";
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            right: 4px;
+            font-size: 0.8rem;
             color: #ffffff;
-            margin-left: 4px;
         }
     }
     </style>
