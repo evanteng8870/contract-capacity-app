@@ -414,7 +414,7 @@ st.markdown(
 
         [data-testid="collapsedControl"]::after,
         [data-testid="stSidebarCollapseButton"]::after {
-            content: " 基本資料輸入區 / 最高需量輸入區切換";
+            content: " 輸入區切換";
             position: absolute;
             top: 50%;
             transform: translateY(-50%);
