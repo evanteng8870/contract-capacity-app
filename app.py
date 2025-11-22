@@ -200,7 +200,7 @@ def build_pdf_report(
         story.append(Spacer(1, 8))
 
     # 標題與 PDF 日期
-    story.append(Paragraph("最適契約容量試算報告 v5.2", styleH))
+    story.append(Paragraph("最適契約容量試算報告 v5.2.1", styleH))
     story.append(Paragraph(f"PDF 製作日期：{pdf_date.isoformat()}", styleN))
     story.append(Spacer(1, 8))
 
@@ -393,7 +393,7 @@ def build_pdf_report(
 # ================== Streamlit 基本設定 ==================
 if not check_password():
     st.stop()
-st.set_page_config(page_title="最適契約容量試算 v5.2", layout="wide")
+st.set_page_config(page_title="最適契約容量試算 v5.2.1", layout="wide")
 
 # 先確保有預設值，再開始畫畫面
 ensure_defaults()
