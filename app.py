@@ -503,7 +503,7 @@ st.markdown(
     """
     <h1 style="font-size:2.1rem; margin-bottom:0.2rem;">最適契約容量試算</h1>
     <p style="font-size:1.2rem; font-weight:600; margin-top:0; color:#f9fafb;">
-      版本 5.2
+      版本 5.2.1
     </p>
     """,
     unsafe_allow_html=True,
