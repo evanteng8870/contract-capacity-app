@@ -9,7 +9,7 @@ import streamlit as st
 
 from core_calc import run_simulation, shift_month
 # ===== 簡單密碼保護機制 =====
-CORRECT_PASSWORD = "1234"   # 測試用密碼，之後你自己改掉
+CORRECT_PASSWORD = "0000"   # 測試用密碼，之後你自己改掉
 
 def check_password():
     """回傳 True 表示密碼正確，False 表示不正確"""
