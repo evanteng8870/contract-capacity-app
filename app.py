@@ -389,10 +389,10 @@ def build_pdf_report(
     buffer.close()
     return pdf_value
 
-if not check_password():
-    st.stop()
 
 # ================== Streamlit 基本設定 ==================
+if not check_password():
+    st.stop()
 st.set_page_config(page_title="最適契約容量試算 v5.2", layout="wide")
 
 # 先確保有預設值，再開始畫畫面
