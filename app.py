@@ -393,7 +393,7 @@ def build_pdf_report(
 # ================== Streamlit 基本設定 ==================
 if not check_password():
     st.stop()
-    
+
     st.caption(
     "📱 提示：手機版可用左上角「≪ / ≫」按鈕，在『基本資料輸入』與『12 個月最大需量輸入』之間切換。"
 )
@@ -415,7 +415,7 @@ st.markdown(
 
         [data-testid="collapsedControl"]::after,
         [data-testid="stSidebarCollapseButton"]::after {
-            content: " 輸入區切換";
+            content: "回需量輸入區";
             position: absolute;
             top: 50%;
             transform: translateY(-50%);
