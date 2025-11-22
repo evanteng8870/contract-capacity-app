@@ -395,6 +395,25 @@ if not check_password():
     st.stop()
 st.set_page_config(page_title="最適契約容量試算 v5.2.1", layout="wide")
 
+# ===== 手機版：在側邊欄切換按鈕旁加上文字提示 =====
+st.markdown(
+    """
+    <style>
+    /* 只在手機 / 小螢幕顯示提示文字 */
+    @media (max-width: 768px) {
+        button[data-testid="collapsedControl"]::after {
+            content: " 切換輸入區";    /* 這就是出現在 ≪ / ≫ 後面的字 */
+            font-size: 0.75rem;
+            color: #ffffff;
+            margin-left: 4px;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# ===== 提示文字設定結束 =====
+
 # 先確保有預設值，再開始畫畫面
 ensure_defaults()
 
