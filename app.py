@@ -393,6 +393,7 @@ def build_pdf_report(
 # ================== Streamlit 基本設定 ==================
 if not check_password():
     st.stop()
+    
     st.caption(
     "📱 提示：手機版可用左上角「≪ / ≫」按鈕，在『基本資料輸入』與『12 個月最大需量輸入』之間切換。"
 )
