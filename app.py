@@ -393,6 +393,9 @@ def build_pdf_report(
 # ================== Streamlit 基本設定 ==================
 if not check_password():
     st.stop()
+    st.caption(
+    "📱 提示：手機版可用左上角「≪ / ≫」按鈕，在『基本資料輸入』與『12 個月最大需量輸入』之間切換。"
+)
 st.set_page_config(page_title="最適契約容量試算 v5.2.1", layout="wide")
 
 # ===== 手機版：在側邊欄切換按鈕旁加上文字提示 =====
@@ -411,7 +414,7 @@ st.markdown(
 
         [data-testid="collapsedControl"]::after,
         [data-testid="stSidebarCollapseButton"]::after {
-            content: " 切換輸入區";
+            content: " 基本資料輸入區 / 最高需量輸入區切換";
             position: absolute;
             top: 50%;
             transform: translateY(-50%);
