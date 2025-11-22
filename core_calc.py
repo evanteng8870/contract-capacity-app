@@ -3,7 +3,6 @@ import datetime
 import pandas as pd
 import streamlit as st
 
-from core_calc import run_simulation, shift_month
 
 st.set_page_config(page_title="最適契約容量試算 v5.2", layout="wide")
 
