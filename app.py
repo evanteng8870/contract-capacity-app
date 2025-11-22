@@ -8,7 +8,42 @@ import pandas as pd
 import streamlit as st
 
 from core_calc import run_simulation, shift_month
+# ===== 簡單密碼保護機制 =====
+CORRECT_PASSWORD = "1234"   # 測試用密碼，之後你自己改掉
 
+def check_password():
+    """回傳 True 表示密碼正確，False 表示不正確"""
+    def password_entered():
+        """使用者按下 Enter 後，檢查密碼"""
+        if st.session_state["password"] == CORRECT_PASSWORD:
+            st.session_state["password_correct"] = True
+        else:
+            st.session_state["password_correct"] = False
+
+    # 第一次載入：還沒有驗證過
+    if "password_correct" not in st.session_state:
+        st.text_input(
+            "請輸入密碼：",
+            type="password",
+            key="password",
+            on_change=password_entered,
+        )
+        return False
+
+    # 驗證過但密碼錯誤
+    if not st.session_state["password_correct"]:
+        st.text_input(
+            "請輸入密碼：",
+            type="password",
+            key="password",
+            on_change=password_entered,
+        )
+        st.error("密碼錯誤，請再試一次。")
+        return False
+
+    # 密碼正確
+    return True
+# ===== 密碼保護機制結束 =====
 # ====== 橫幅圖片路徑 ======
 BANNER_PATH = "banner_header.jpg"  # 寬版招牌圖
 
@@ -354,6 +389,8 @@ def build_pdf_report(
     buffer.close()
     return pdf_value
 
+if not check_password():
+    st.stop()
 
 # ================== Streamlit 基本設定 ==================
 st.set_page_config(page_title="最適契約容量試算 v5.2", layout="wide")
