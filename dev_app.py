@@ -1,41 +1,26 @@
-# dev_app.py － 最適契約容量試算 v5.2.1（Tabs 開發版）
-
+# app.py
 import datetime
 import io
+import json
 import os
 
 import pandas as pd
 import streamlit as st
 
-from core_calc import run_simulation
+from core_calc import run_simulation, shift_month
+# ===== 簡單密碼保護機制 =====
+CORRECT_PASSWORD = "0000"   # 測試用密碼，之後你自己改掉
 
-# ====================== 共用小工具 ======================
-
-def shift_month_local(base_date: datetime.date, delta: int) -> datetime.date:
-    """
-    以 base_date 為基準，往前 / 往後 delta 個月。
-    固定回傳該月 1 號的日期。
-    """
-    month_index = base_date.year * 12 + (base_date.month - 1) + delta
-    year = month_index // 12
-    month = month_index % 12 + 1
-    return datetime.date(year, month, 1)
-
-
-# ====================== 密碼保護 ======================
-
-CORRECT_PASSWORD = "0000"  # 開發版密碼，可自行修改
-
-
-def check_password() -> bool:
-    """簡單的密碼保護機制，通過回傳 True。"""
-
+def check_password():
+    """回傳 True 表示密碼正確，False 表示不正確"""
     def password_entered():
+        """使用者按下 Enter 後，檢查密碼"""
         if st.session_state["password"] == CORRECT_PASSWORD:
             st.session_state["password_correct"] = True
         else:
             st.session_state["password_correct"] = False
 
+    # 第一次載入：還沒有驗證過
     if "password_correct" not in st.session_state:
         st.text_input(
             "請輸入密碼：",
@@ -45,6 +30,7 @@ def check_password() -> bool:
         )
         return False
 
+    # 驗證過但密碼錯誤
     if not st.session_state["password_correct"]:
         st.text_input(
             "請輸入密碼：",
@@ -55,375 +41,673 @@ def check_password() -> bool:
         st.error("密碼錯誤，請再試一次。")
         return False
 
+    # 密碼正確
     return True
+# ===== 密碼保護機制結束 =====
+# ====== 橫幅圖片路徑 ======
+BANNER_PATH = "banner_header.jpg"  # 寬版招牌圖
 
-
-# ====================== 初始狀態 ======================
-
+# ================== 共用：初始化預設值 ==================
 def ensure_defaults() -> None:
-    """初始化所有會用到的 session_state key。"""
-
-    if st.session_state.get("initialized_tabs"):
+    """
+    第一次執行時，設定所有欄位的預設值。
+    之後所有 widget 只用 key 綁定，不額外給 value/index，
+    讓狀態完全由 session_state 控制。
+    """
+    if st.session_state.get("initialized"):
         return
 
-    st.session_state["initialized_tabs"] = True
+    st.session_state["initialized"] = True
 
-    # 基本資料（字串版，方便用 placeholder）
-    st.session_state.setdefault("customer_name_str", "")
-    st.session_state.setdefault("meter_no_str", "")
-    st.session_state.setdefault("address_str", "")
-    st.session_state.setdefault("supply_name", "高壓用電")
-    st.session_state.setdefault("contract_kw_current_str", "")
+    # 基本資料
+    st.session_state["customer_name"] = ""
+    st.session_state["meter_no"] = ""
+    st.session_state["address"] = ""
+    st.session_state["supply_name"] = "高壓用電"
+    # 契約容量：字串輸入欄位，預設空白，placeholder 顯示 0
+    st.session_state["contract_kw_current"] = ""
 
-    # 起算年月（預設本月）
+    # 起算年月：以今天月份為預設
     today = datetime.date.today()
-    st.session_state.setdefault(
-        "start_month_label", f"{today.year:04d}-{today.month:02d}"
-    )
+    st.session_state["start_month_label"] = f"{today.year:04d}-{today.month:02d}"
 
-    # 12 個月最大需量：字串＋數值各一份
+    # 12 個最大需量欄位：一律預設空白
     for i in range(12):
-        st.session_state.setdefault(f"md_{i}_str", "")
-        st.session_state.setdefault(f"md_{i}", 0.0)
-
-    # 試算結果
-    st.session_state.setdefault("result_df", None)
-    st.session_state.setdefault("best_contract_kw", None)
+        st.session_state[f"md_{i}"] = ""
 
 
-# ====================== PDF 報表（簡易版） ======================
+# ================== 清除全部資料（唯一重置按鈕） ==================
+def clear_all() -> None:
+    """
+    清除所有輸入與計算結果，並寫回預設值。
+    """
+    st.session_state["customer_name"] = ""
+    st.session_state["meter_no"] = ""
+    st.session_state["address"] = ""
+    st.session_state["supply_name"] = "高壓用電"
+    st.session_state["contract_kw_current"] = ""
 
+    today = datetime.date.today()
+    st.session_state["start_month_label"] = f"{today.year:04d}-{today.month:02d}"
+
+    for i in range(12):
+        st.session_state[f"md_{i}"] = ""
+    # callback 結束後 Streamlit 會自動 rerun
+
+
+# ================== PDF 字型處理 ==================
+def register_cjk_font() -> str:
+    """
+    嘗試註冊可顯示中文的字型。
+    優先使用專案目錄下的 NotoSansTC；找不到就退回 Helvetica。
+    回傳給 ReportLab 使用的 fontName。
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    candidates = [
+        "NotoSansTC-Regular.otf",
+        "NotoSansTC-Regular.ttf",
+        "NotoSansCJKtc-Regular.otf",
+        os.path.join("fonts", "NotoSansTC-Regular.otf"),
+        os.path.join("fonts", "NotoSansTC-Regular.ttf"),
+    ]
+
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont("CJK", path))
+                return "CJK"
+            except Exception:
+                continue
+
+    # 找不到就用內建 Helvetica（中文可能 fallback 成系統行為）
+    return "Helvetica"
+
+
+# ================== PDF 報表產生（使用你提供的版本） ==================
 def build_pdf_report(
-    df_result: pd.DataFrame,
+    *,
+    current_summary: dict,
+    df_curr: pd.DataFrame,
+    df_scan: pd.DataFrame,
+    best_row: dict,
     customer_name: str,
     meter_no: str,
     address: str,
-    supply_name: str,
-    contract_kw_current: float,
+    contract_kw_value: int,
+    pdf_date: datetime.date,
 ) -> bytes:
     """
-    Tabs 開發版簡易 PDF。
-    如果日後要跟正式版完全一樣，可以把正式版的 build_pdf_report 搬過來取代這個函式。
+    依照目前試算結果，產生一份精簡 PDF 報表。
     """
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import mm
-        from reportlab.pdfgen import canvas
-    except ImportError:
-        buffer = io.BytesIO()
-        return buffer.getvalue()
-
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-
-    margin_left = 20 * mm
-    margin_top = height - 20 * mm
-    line_h = 6 * mm
-
-    # 標題
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(margin_left, margin_top, "最適契約容量試算報告（Tabs 開發版）")
-
-    y = margin_top - 2 * line_h
-    c.setFont("Helvetica", 11)
-    c.drawString(margin_left, y, f"客戶名稱：{customer_name}")
-    y -= line_h
-    c.drawString(margin_left, y, f"台電電號：{meter_no}")
-    y -= line_h
-    c.drawString(margin_left, y, f"用電地址：{address}")
-    y -= line_h
-    c.drawString(margin_left, y, f"供電別：{supply_name}")
-    y -= line_h
-    c.drawString(margin_left, y, f"現行契約容量：{contract_kw_current:.0f} kW")
-
-    # 結果摘要
-    y -= 2 * line_h
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin_left, y, "試算結果節錄：")
-    y -= 1.4 * line_h
-    c.setFont("Helvetica", 10)
-
-    # 找出關鍵欄位名稱
-    kw_col_candidates = ["建議契約容量(kW)", "契約容量(kW)", "契約容量"]
-    kw_col = next((cname for cname in kw_col_candidates if cname in df_result.columns), None)
-    if kw_col is None:
-        kw_col = df_result.columns[0]
-
-    cost_col = "全年總費用(元)" if "全年總費用(元)" in df_result.columns else df_result.columns[-1]
-
-    # 標題列
-    c.drawString(margin_left, y, kw_col)
-    c.drawString(margin_left + 60 * mm, y, cost_col)
-    y -= line_h
-
-    # 節錄前 8 筆
-    for _, row in df_result.head(8).iterrows():
-        if y < 30 * mm:
-            c.showPage()
-            y = margin_top
-
-        try:
-            kw_val = float(row[kw_col])
-        except Exception:
-            kw_val = row[kw_col]
-
-        c.drawString(margin_left, y, f"{kw_val}")
-        c.drawString(margin_left + 60 * mm, y, f"{row[cost_col]:,.0f}")
-        y -= line_h
-
-    y -= line_h
-    c.setFont("Helvetica-Oblique", 9)
-    c.drawString(
-        margin_left,
-        y,
-        "※ 本報告僅供試算參考，實際電費仍以台電電費帳單為準。",
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+        Image,
     )
 
-    c.showPage()
-    c.save()
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+    )
+
+    font_name = register_cjk_font()
+    styles = getSampleStyleSheet()
+
+    styleN = ParagraphStyle(
+        "NormalCJK",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=10,
+        leading=14,
+    )
+    styleH = ParagraphStyle(
+        "HeadingCJK",
+        parent=styles["Heading2"],
+        fontName=font_name,
+        fontSize=14,
+        leading=18,
+        spaceAfter=6,
+    )
+    styleTR = ParagraphStyle(
+        "RightAlign",
+        parent=styleN,
+        alignment=2,  # 右對齊
+    )
+
+    story = []
+
+    # 招牌圖片
+    if os.path.exists(BANNER_PATH):
+        img = Image(BANNER_PATH)
+        max_width = A4[0] - 40 * mm
+        max_height = 40 * mm
+        img._restrictSize(max_width, max_height)
+        story.append(img)
+        story.append(Spacer(1, 8))
+
+    # 標題與 PDF 日期
+    story.append(Paragraph("最適契約容量試算報告 v5.2.1", styleH))
+    story.append(Paragraph(f"PDF 製作日期：{pdf_date.isoformat()}", styleN))
+    story.append(Spacer(1, 8))
+
+    # ================== 一、基本資料 ==================
+    story.append(Paragraph("一、基本資料", styleH))
+    story.append(
+        Paragraph(
+            f"客戶名稱：{customer_name}<br/>"
+            f"台電電號：{meter_no}<br/>"
+            f"用電地址：{address}<br/>"
+            f"供電別：{current_summary['供電別']}<br/>"
+            f"起算年月：{current_summary['起算年月']}<br/>"
+            f"現行契約容量：{current_summary['現行契約容量(kW)']:.1f} kW",
+            styleN,
+        )
+    )
+    story.append(Spacer(1, 10))
+
+    # ================== 二、現行契約一年結算結果 ==================
+    story.append(Paragraph("二、現行契約一年結算結果", styleH))
+
+    cs = current_summary
+    summary_data = [
+        ["項目", "金額（元）"],
+        ["一年基本電費合計", f"{cs['一年基本電費合計']:.1f}"],
+        ["一年超約附加費合計", f"{cs['一年超約附加費合計']:.1f}"],
+        ["一年合計", f"{cs['一年合計']:.1f}"],
+    ]
+    tbl_summary = Table(summary_data, hAlign="LEFT")
+    tbl_summary.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
+                ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ]
+        )
+    )
+    story.append(tbl_summary)
+    story.append(Spacer(1, 10))
+
+    # ================== 三、現行契約與最適契約成本比較 ==================
+    story.append(Paragraph("三、現行契約與最適契約成本比較", styleH))
+
+    best_total = best_row["一年合計"]
+    best_cap_kw = best_row["契約容量(kW)"]
+    saving = cs["一年合計"] - best_total
+
+    compare_data = [
+        ["項目", "契約容量(kW)", "一年合計金額（元）"],
+        [
+            "現行契約",
+            f"{contract_kw_value:.1f}",
+            f"{cs['一年合計']:.1f}",
+        ],
+        [
+            "最適契約",
+            f"{best_cap_kw:.1f}",
+            f"{best_total:.1f}",
+        ],
+    ]
+
+    from reportlab.platypus import Table, TableStyle
+
+    tbl_compare = Table(
+        compare_data, hAlign="LEFT", colWidths=[40 * mm, 40 * mm, 60 * mm]
+    )
+    tbl_compare.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (1, 1), (1, -1), "CENTER"),
+                ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ]
+        )
+    )
+    story.append(tbl_compare)
+
+    if saving > 0:
+        msg = f"採用最適契約容量時，每年可節省約 {saving:.1f} 元（基本電費＋超約附加費合計）。"
+    elif saving < 0:
+        msg = f"採用最適契約容量時，每年將增加約 {abs(saving):.1f} 元（基本電費＋超約附加費合計）。"
+    else:
+        msg = "最適契約容量與現行契約容量的一年總金額相同。"
+
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(msg, styleN))
+    story.append(Spacer(1, 10))
+
+    # ================== helper：DataFrame → Table（含交錯底色、最佳列淡橘） ==================
+    def dataframe_to_table(
+        df: pd.DataFrame,
+        title: str | None = None,
+        best_index: int | None = None,
+    ) -> None:
+        from reportlab.platypus import Table, TableStyle
+
+        if title:
+            story.append(Paragraph(title, styleH))
+
+        if df.empty:
+            story.append(Paragraph("（無資料）", styleN))
+            story.append(Spacer(1, 6))
+            return
+
+        df_local = df.copy()
+
+        # 所有數字欄位四捨五入到小數點 1 位
+        for col in df_local.select_dtypes(include=["number"]).columns:
+            df_local[col] = df_local[col].round(1)
+
+        data = [list(df_local.columns)] + df_local.astype(str).values.tolist()
+        tbl = Table(data, hAlign="LEFT")
+
+        style_cmds = [
+            ("FONTNAME", (0, 0), (-1, -1), font_name),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]
+
+        # 「單價」「最大需量」→置中；「電費」「附加費」「合計」→靠右
+        for idx, col in enumerate(df_local.columns):
+            col_name = str(col)
+            if any(k in col_name for k in ["單價", "最大需量"]):
+                style_cmds.append(("ALIGN", (idx, 0), (idx, -1), "CENTER"))
+            elif any(k in col_name for k in ["電費", "附加費", "合計"]):
+                style_cmds.append(("ALIGN", (idx, 1), (idx, -1), "RIGHT"))
+
+        # 交錯底色（從資料列 row=1 開始）
+        for row_i in range(1, len(data)):
+            if best_index is not None and row_i == best_index + 1:
+                # 這一列讓給淡橘色標註，不套交錯色
+                continue
+            bg = (
+                colors.HexColor("#F9FAFB")
+                if row_i % 2 == 1
+                else colors.HexColor("#E5E7EB")
+            )
+            style_cmds.append(("BACKGROUND", (0, row_i), (-1, row_i), bg))
+
+        # 最佳契約列：淡橘色底 + 深字
+        if best_index is not None:
+            row_best = best_index + 1  # header 在第 0 列
+            style_cmds.append(
+                ("BACKGROUND", (0, row_best), (-1, row_best), colors.HexColor("#FED7AA"))
+            )
+            style_cmds.append(
+                ("TEXTCOLOR", (0, row_best), (-1, row_best), colors.HexColor("#7C2D12"))
+            )
+
+        tbl.setStyle(TableStyle(style_cmds))
+        story.append(tbl)
+        story.append(Spacer(1, 10))
+
+    # ================== 四、現行契約每月明細 ==================
+    dataframe_to_table(df_curr, "四、現行契約每月明細")
+
+    # ================== 五、契約容量掃描結果（節錄） ==================
+    # 找出最佳契約列在 df_scan 中的 index
+    best_cap_kw_val = best_row["契約容量(kW)"]
+    best_indices = df_scan.index[df_scan["契約容量(kW)"] == best_cap_kw_val].tolist()
+    best_idx = best_indices[0] if best_indices else None
+
+    dataframe_to_table(df_scan, "五、契約容量掃描結果（節錄）", best_index=best_idx)
+
+    # 頁尾
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("※ 試算結果僅供參考，實際金額以台電帳單為準。", styleN))
+    story.append(Spacer(1, 18))
+    story.append(Paragraph("關山水電工程股份有限公司 製作", styleTR))
+
+    doc.build(story)
     pdf_value = buffer.getvalue()
     buffer.close()
     return pdf_value
 
 
-# ====================== 樣式 ======================
+# ================== Streamlit 基本設定 ==================
+if not check_password():
+    st.stop()
 
-def apply_global_style():
-    """整體 CSS（深藍背景 + 手機優化）。"""
-    st.markdown(
-        """
-        <style>
-        /* 主畫面背景：深藍漸層 */
-        [data-testid="stAppViewContainer"] {
-            background: radial-gradient(circle at top,
-                #1e3a8a 0,
-                #0b1120 55%,
-                #020617 100%);
+    st.caption(
+    "📱 提示：手機版可用左上角「≪ / ≫」按鈕，在『基本資料輸入』與『12 個月最大需量輸入』之間切換。"
+)
+st.set_page_config(page_title="最適契約容量試算 v5.2.1", layout="wide")
+
+# ===== 手機版：在側邊欄切換按鈕旁加上文字提示 =====
+st.markdown(
+    """
+    <style>
+    /* 只在小螢幕顯示提示文字 */
+    @media (max-width: 1024px) {
+
+        /* 先多 cover 幾種可能的 testid */
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapseButton"] {
+            position: relative;
+            padding-right: 64px;   /* 給右邊一點空間放文字 */
+        }
+
+        [data-testid="collapsedControl"]::after,
+        [data-testid="stSidebarCollapseButton"]::after {
+            content: "回需量輸入";
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            right: 4px;
+            font-size: 0.8rem;
             color: #ffffff;
         }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# ===== 提示文字設定結束 =====
 
-        /* 主要內容區塊間距 */
-        .block-container {
-            padding-top: 1.5rem;
-            padding-bottom: 3rem;
-        }
+# 先確保有預設值，再開始畫畫面
+ensure_defaults()
 
-        /* 手機模式隱藏左上方 << 之類的 sidebar 切換按鈕 */
-        @media (max-width: 1024px) {
-            [data-testid="collapsedControl"],
-            [data-testid="stSidebarCollapseButton"] {
-                display: none !important;
-            }
-        }
+# ================== 全局樣式（背景色 + 字型微調） ==================
+st.markdown(
+    """
+    <style>
+      /* 主畫面背景：深藍漸層 */
+      [data-testid="stAppViewContainer"] {
+          background: radial-gradient(circle at top,
+                                      #1e3a8a 0,
+                                      #0b1120 55%,
+                                      #020617 100%);
+      }
 
-        /* DataFrame 字體稍微小一點 */
-        .stDataFrame tbody td {
-            font-size: 0.85rem;
-        }
+      /* 側邊欄背景：深藍灰漸層 */
+      [data-testid="stSidebar"] {
+          background: linear-gradient(180deg, #0f172a, #020617);
+      }
 
-                
-        /* 按鈕樣式（例如「開始試算」、「清除資料」、「下載 PDF」） */
-        .stButton button {
-            background-color: #f97316;
-            color: #ffffff;
-            border-radius: 4px;
-            border: none;
-        }
-        .stButton button:hover {
-            background-color: #ea580c;
-        }
+      /* 側邊欄內所有文字顏色 */
+      [data-testid="stSidebar"] * {
+          color: #e5e7eb !important;
+      }
 
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+      /* 側邊欄輸入框背景 + 文字顏色（桌機＋手機） */
+      [data-testid="stSidebar"] input,
+      [data-testid="stSidebar"] textarea {
+          background-color: #020617 !important;
+          color: #f9fafb !important;
+      }
 
+      /* 側邊欄 selectbox 文字與底色 */
+      [data-testid="stSidebar"] [data-baseweb="select"] > div {
+          background-color: #020617 !important;
+          color: #f9fafb !important;
+      }
 
-# ====================== Tab 1：基本資料輸入 ======================
+      /* 側邊欄 placeholder 顏色 */
+      [data-testid="stSidebar"] ::placeholder {
+          color: #9ca3af !important;
+      }
 
-def render_basic_form():
-    """Tab 1：基本資料輸入畫面。"""
+      /* 主區輸入框顏色（12 個月最大需量 + 現行契約容量） */
+      [data-testid="stAppViewContainer"] input {
+          background-color: #020617 !important;
+          color: #f9fafb !important;
+      }
 
-    st.subheader("基本資料輸入")
+      /* 一般標題與內文顏色（避免被主題調成透明） */
+      h1, h2, h3, h4, h5, h6 {
+          color: #f9fafb !important;
+      }
+      [data-testid="stMarkdownContainer"] {
+          color: #e5e7eb !important;
+      }
 
-    # 客戶名稱：placeholder 顯示「未命名客戶」，實際值留在 _str 裡
-    name_input = st.text_input(
+      /* caption 文字加亮 */
+      p[data-testid="stCaption"] {
+          color: #e5e7eb !important;
+      }
+
+      /* metric 數字顏色加亮 */
+      [data-testid="stMetricValue"] {
+          color: #f9fafb !important;
+      }
+
+      /* DataFrame 表格字顏色保持深色，避免整個白字白底 */
+      [data-testid="stTable"], [data-testid="stDataFrame"] {
+          color: #0f172a !important;
+      }
+
+      /* ===== 按鈕樣式（桌機＋手機通用） ===== */
+
+      /* 開始試算：primary → 紅色 */
+      div[data-testid="stButton"] > button[kind="primary"] {
+          background-color: #ef4444 !important;  /* 紅色 */
+          color: #ffffff !important;
+          border: 1px solid #b91c1c !important;
+      }
+
+      /* 清除資料並重新輸入：secondary → 綠色 */
+      div[data-testid="stButton"] > button[kind="secondary"] {
+          background-color: #16a34a !important;  /* 綠色 */
+          color: #f9fafb !important;
+          border: 1px solid #15803d !important;
+      }
+
+      /* 下載 PDF 按鈕：橘色 */
+      div[data-testid="stDownloadButton"] > button {
+          background-color: #f97316 !important;  /* 橘色 */
+          color: #f9fafb !important;
+          border: 1px solid #ea580c !important;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ================== 頁首招牌圖 + 標題 ==================
+if os.path.exists(BANNER_PATH):
+    st.image(BANNER_PATH, use_container_width=True)
+
+# 兩行標題：最適契約容量試算 / 版本 5.2
+st.markdown(
+    """
+    <h1 style="font-size:2.1rem; margin-bottom:0.2rem;">最適契約容量試算</h1>
+    <p style="font-size:1.2rem; font-weight:600; margin-top:0; color:#f9fafb;">
+      版本 5.2.1
+    </p>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.caption("高壓 / 低壓用電 · 自動掃描契約容量 · 基本電費 + 超約附加費試算")
+st.markdown("---")
+
+# ================== 側邊欄：基本資料輸入 ==================
+with st.sidebar:
+    st.header("基本資料輸入")
+
+    # 客戶名稱
+    customer_name = st.text_input(
         "客戶名稱",
-        value=st.session_state.get("customer_name_str", ""),
+        key="customer_name",
         placeholder="未命名客戶",
     )
-    st.session_state["customer_name_str"] = name_input
 
     # 台電電號
-    st.session_state["meter_no_str"] = st.text_input(
+    meter_no = st.text_input(
         "台電電號",
-        value=st.session_state.get("meter_no_str", ""),
+        key="meter_no",
         placeholder="12-34-5678-90",
     )
 
     # 用電地址
-    st.session_state["address_str"] = st.text_input(
+    address = st.text_input(
         "用電地址",
-        value=st.session_state.get("address_str", ""),
+        key="address",
         placeholder="請輸入用電地址",
     )
 
     # 供電別
-    st.session_state["supply_name"] = st.selectbox(
+    supply_name = st.selectbox(
         "供電別",
-        options=["高壓用電", "低壓用電"],
-        index=0 if st.session_state.get("supply_name", "高壓用電") == "高壓用電" else 1,
+        ["高壓用電", "低壓用電"],
+        key="supply_name",
     )
+    supply_type = "HV" if supply_name == "高壓用電" else "LV"
 
-    # 現行契約容量：文字＋placeholder「0」，內部轉成整數
-    contract_str = st.text_input(
+    # 現行契約容量 (kW) —— 文字輸入、只收整數，placeholder「0」
+    contract_kw_current_str = st.text_input(
         "現行契約容量 (kW)",
-        value=st.session_state.get("contract_kw_current_str", ""),
+        key="contract_kw_current",
         placeholder="0",
     )
-    st.session_state["contract_kw_current_str"] = contract_str
 
-    if contract_str.strip() == "":
-        contract_kw = 0
+# ================== 12 個月最大需量輸入區 & 起算年月 ==================
+st.subheader("12 個月最大需量輸入")
+
+# 起算年月（最近三年內）放在右側主畫面、標題下面
+today = datetime.date.today()
+month_labels: list[str] = []
+for i in range(36):  # 最近 36 個月（含本月）
+    y, m = shift_month(today.year, today.month, -i)
+    month_labels.append(f"{y:04d}-{m:02d}")
+
+default_label = f"{today.year:04d}-{today.month:02d}"
+if "start_month_label" not in st.session_state:
+    st.session_state["start_month_label"] = default_label
+
+if st.session_state["start_month_label"] not in month_labels:
+    st.session_state["start_month_label"] = default_label
+
+start_month_label = st.selectbox(
+    "起算年月（最近三年內）",
+    month_labels,
+    index=month_labels.index(st.session_state["start_month_label"]),
+    key="start_month_label",
+)
+
+start_year = int(start_month_label.split("-")[0])
+start_month = int(start_month_label.split("-")[1])
+
+st.markdown("說明：以起算月份為第 1 筆，往前推共 12 個月份。")
+
+# 產生 12 個月份標籤（起算月往前推）
+months: list[tuple[int, int]] = []
+for i in range(12):
+    y, m = shift_month(start_year, start_month, -i)
+    months.append((y, m))
+
+max_demand_strs: list[str] = []
+month_input_keys: list[str] = []
+
+group_cols = st.columns(3, gap="large")
+
+for col_idx in range(3):
+    with group_cols[col_idx]:
+        for row_idx in range(4):
+            idx = col_idx * 4 + row_idx
+            y, m = months[idx]
+            label = f"{y:04d}-{m:02d} 最大需量(kW)"
+            key = f"md_{idx}"
+            month_input_keys.append(key)
+
+            raw = st.text_input(
+                label,
+                key=key,
+                placeholder="0",
+            )
+            max_demand_strs.append(raw)
+
+st.markdown("---")
+
+# ================== 按鈕列：開始試算 + 清除全部 ==================
+col_run, col_reset_all = st.columns(2)
+
+with col_run:
+    run_clicked = st.button("開始試算", type="primary")
+
+with col_reset_all:
+    st.button("清除資料並重新輸入", on_click=clear_all)
+
+# ================== 主體：開始試算 ==================
+if run_clicked:
+    # 先檢查現行契約容量
+    ckw_raw = str(contract_kw_current_str).strip()
+    if (not ckw_raw.isdigit()) or int(ckw_raw) <= 0:
+        st.error("現行契約容量必須為大於 0 的整數（kW），請重新輸入。")
     else:
-        try:
-            contract_kw = int(contract_str)
-        except ValueError:
-            st.warning("⚠ 現行契約容量請輸入整數 kW，已套用前次有效數值或 0。")
-            contract_kw = int(st.session_state.get("contract_kw_current", 0))
+        contract_kw_value = int(ckw_raw)
 
-    st.session_state["contract_kw_current"] = contract_kw
+        # 檢查 12 個最大需量
+        max_demands: list[int] = []
+        invalid_indices = []
+        non_positive_indices = []
 
-    
-# ====================== Tab 2：12 個月最大需量 + 結果 ======================
+        for idx, raw in enumerate(max_demand_strs):
+            s = str(raw).strip()
 
-def render_demand_and_result():
-    """Tab 2：12 個月最大需量 & 試算結果。"""
+            if s == "":
+                value = 0
+            else:
+                if not s.isdigit():
+                    invalid_indices.append(idx)
+                    value = 0
+                else:
+                    value = int(s)
 
-    st.subheader("12 個月最大需量輸入")
+            if value <= 0:
+                non_positive_indices.append(idx)
 
-def render_demand_and_result():
-    """Tab 2：12 個月最大需量 & 試算結果。"""
+            max_demands.append(value)
 
-    st.subheader("12 個月最大需量輸入")
-
-    # ---- 起算年月選擇（移到這裡）----
-    today = datetime.date.today()
-    month_labels = []
-    months = []
-    for i in range(36):
-        d = shift_month_local(today, -i)
-        months.append(d)
-        month_labels.append(f"{d.year:04d}-{d.month:02d}")
-
-    current_label = st.session_state.get("start_month_label", month_labels[0])
-    try:
-        current_index = month_labels.index(current_label)
-    except ValueError:
-        current_index = 0
-
-    choice = st.selectbox(
-        "起算年月（最近三年內）",
-        options=month_labels,
-        index=current_index,
-        help="以選定年月為第 1 筆，往前推共 12 個月份。",
-    )
-    st.session_state["start_month_label"] = choice
-
-    st.markdown("---")
-
-    # 根據起算年月產生 12 個月份（由舊到新）
-    start_label = st.session_state.get("start_month_label")
-    try:
-        year, month = [int(x) for x in start_label.split("-")]
-        start_date = datetime.date(year, month, 1)
-    except Exception:
-        st.error("起算年月格式錯誤，請回到『基本資料輸入』重新選擇，例如：2025-11")
-        return
-
-    # 以「起算年月」為第一格，往前推 11 個月，共 12 個月份
-    # 例如起算 2025-11 → 顯示順序：2025-11、2025-10、…、2024-12
-    months_desc = [shift_month_local(start_date, -i) for i in range(0, 12)]
-    month_labels_desc = [f"{d.year:04d}-{d.month:02d}" for d in months_desc]
-
-    # 12 個輸入格（文字＋placeholder「0」）
-    for i, label in enumerate(month_labels_desc):
-        key_str = f"md_{i}_str"
-        key_num = f"md_{i}"
-
-        md_str = st.text_input(
-            f"{label} 最大需量 (kW)",
-            value=st.session_state.get(key_str, ""),
-            placeholder="0",
-        )
-        st.session_state[key_str] = md_str
-
-        if md_str.strip() == "":
-            md_val = 0.0
+        if invalid_indices:
+            month_labels_err = [
+                f"{months[i][0]:04d}-{months[i][1]:02d}" for i in invalid_indices
+            ]
+            st.error(
+                "以下月份的最大需量輸入「不是純數字」，請修正後再試算：\n\n"
+                + "、".join(month_labels_err)
+            )
+        elif non_positive_indices:
+            month_labels_err = [
+                f"{months[i][0]:04d}-{months[i][1]:02d}" for i in non_positive_indices
+            ]
+            st.error(
+                "所有最大需量必須大於 0 kW，以下月份目前為 0 或未填寫，請補齊：\n\n"
+                + "、".join(month_labels_err)
+            )
         else:
-            try:
-                md_val = float(md_str)
-            except ValueError:
-                st.warning(f"⚠ {label} 最大需量請輸入數字，已套用前次有效數值或 0。")
-                md_val = float(st.session_state.get(key_num, 0.0))
+            display_customer_name = customer_name.strip() or "未命名客戶"
+            display_meter_no = meter_no.strip() or "（未輸入）"
+            display_address = address.strip() or "（未輸入）"
+            calc_date = datetime.date.today()
 
-        st.session_state[key_num] = md_val
-
-    st.markdown("---")
-
-    # ====== 試算 / 清除 按鈕 ======
-    col_run, col_clear = st.columns([1, 1])
-    with col_run:
-        run_clicked = st.button("開始試算")
-    with col_clear:
-        clear_clicked = st.button("清除資料")
-
-    # 清除：把 12 個月輸入 & 結果都清空
-    if clear_clicked:
-        for i in range(12):
-            st.session_state[f"md_{i}_str"] = ""
-            st.session_state[f"md_{i}"] = 0.0
-        st.session_state["result_df"] = None
-        st.session_state["best_contract_kw"] = None
-        st.experimental_rerun()
-
-    # ====== 試算邏輯（改成跟 app.py 一樣的介面） ======
-    if run_clicked:
-        # 12 個月最大需量（已經在前面用 text_input 收好）
-        demand_values = [st.session_state[f"md_{i}"] for i in range(12)]
-
-        # 這個 df_demand 只是保留用，如果之後想畫圖、檢查也可以用
-        df_demand = pd.DataFrame(
-            {
-                "年月": month_labels_desc,
-                "最大需量(kW)": demand_values,
-            }
-        )
-
-        # ===== 跟 app.py 一樣先整理參數 =====
-        # 客戶名稱（空的時候顯示「未命名客戶」）
-        display_customer_name = (
-            st.session_state.get("customer_name_str", "").strip() or "未命名客戶"
-        )
-
-        # 供電別：轉成 supply_type（HV / LV）
-        supply_name = st.session_state.get("supply_name", "高壓用電")
-        supply_type = "HV" if supply_name == "高壓用電" else "LV"
-
-        # 現行契約容量
-        contract_kw_value = float(st.session_state.get("contract_kw_current", 0.0))
-
-        # 起算年月（剛剛上面用 start_date 算出來的）
-        start_year = start_date.year
-        start_month = start_date.month
-
-        # 12 個月最大需量列表
-        max_demands = demand_values
-
-        # ===== 實際呼叫 run_simulation（介面完全比照 app.py）=====
-        with st.spinner("計算中..."):
-            try:
+            with st.spinner("計算中..."):
                 (
                     current_detail,
                     current_summary,
@@ -438,93 +722,119 @@ def render_demand_and_result():
                     start_month=start_month,
                     max_demands=max_demands,
                 )
-            except Exception as e:
-                st.error(f"試算時發生錯誤：{e}")
-                return
 
-        # 把結果存進 session_state，下面顯示用
-        st.session_state["result_df"] = scan_table
-        st.session_state["current_summary"] = current_summary
-        st.session_state["best_contract_kw"] = (
-            best_row.get("契約容量(kW)")
-            if isinstance(best_row, dict) or hasattr(best_row, "get")
-            else None
-        )
+            st.success("試算完成 ✅")
 
-    result_df = st.session_state.get("result_df")
-    if result_df is not None:
-        st.subheader("試算結果")
-        st.dataframe(result_df, use_container_width=True)
-
-        # 如果有全年總費用欄位，找出最低者
-        best_kw = None
-        if "全年總費用(元)" in result_df.columns:
-            best_idx = result_df["全年總費用(元)"].idxmin()
-            best_row = result_df.loc[best_idx]
-            kw_col_candidates = ["建議契約容量(kW)", "契約容量(kW)", "契約容量"]
-            kw_col = next((c for c in kw_col_candidates if c in result_df.columns), None)
-            if kw_col:
-                best_kw = best_row[kw_col]
-                st.success(f"建議契約容量：約 {best_kw} kW（依全年總費用最低）")
-
-        st.markdown("---")
-
-        if st.button("下載試算報告（PDF）"):
-            customer_name = (
-                st.session_state.get("customer_name_str", "").strip()
-                or "未命名客戶"
+            # ===== 現行契約一年結算結果 =====
+            st.subheader("現行契約一年結算結果")
+            csum = current_summary
+            st.write(
+                f"**客戶名稱：** {csum['客戶名稱']}  \n"
+                f"**台電電號：** {display_meter_no}  \n"
+                f"**用電地址：** {display_address}  \n"
+                f"**供電別：** {csum['供電別']}  \n"
+                f"**現行契約容量：** {csum['現行契約容量(kW)']:.1f} kW  \n"
+                f"**起算年月：** {csum['起算年月']}  \n"
+                f"**試算日期：** {calc_date.isoformat()}  \n"
             )
-            meter_no = st.session_state.get("meter_no_str", "")
-            address = st.session_state.get("address_str", "")
-            supply_name = st.session_state.get("supply_name", "高壓用電")
-            contract_kw = float(st.session_state.get("contract_kw_current", 0))
 
+            col1, col2, col3 = st.columns(3)
+            col1.metric("一年基本電費合計", f"{csum['一年基本電費合計']:,.0f} 元")
+            col2.metric("一年超約附加費合計", f"{csum['一年超約附加費合計']:,.0f} 元")
+            col3.metric("一年合計", f"{csum['一年合計']:,.0f} 元")
+
+            # ===== 現行契約每月明細 =====
+            st.markdown("#### 現行契約每月明細")
+            df_curr = pd.DataFrame(current_detail)
+            st.dataframe(df_curr, use_container_width=True)
+
+            # ===== 契約容量掃描結果（最佳值上下各六格） =====
+            st.markdown("#### 契約容量掃描結果（最佳值上下各六格）")
+            st.markdown(
+                f"12 個月最大需量平均值：約 **{avg_max_demand:.0f} kW**  \n"
+                "以平均值為中心，**每 1 kW** 向上 / 向下掃描至 **±200 kW**，"
+                "以下僅列出「最適契約容量」上下各六格。"
+            )
+
+            df_scan = pd.DataFrame(scan_table)
+
+            if "平均每月" in df_scan.columns:
+                df_scan = df_scan.drop(columns=["平均每月"])
+
+            best_cap = best_row["契約容量(kW)"]
+
+            def highlight_best(row):
+                color = "#ffcccc" if abs(row["契約容量(kW)"] - best_cap) < 1e-6 else ""
+                return ["background-color: {}".format(color)] * len(row)
+
+            st.dataframe(
+                df_scan.style.apply(highlight_best, axis=1).format(
+                    {
+                        "契約容量(kW)": "{:.0f}",
+                        "一年基本電費合計": "{:,.0f}",
+                        "一年超約附加費合計": "{:,.0f}",
+                        "一年合計": "{:,.0f}",
+                    }
+                ),
+                use_container_width=True,
+            )
+
+            # ===== 現行契約與最適契約成本比較 =====
+            st.markdown("#### 現行契約與最適契約成本比較")
+
+            best_total = best_row["一年合計"]
+            best_cap_kw = best_row["契約容量(kW)"]
+            saving = csum["一年合計"] - best_total
+
+            colL, colR = st.columns(2)
+
+            with colL:
+                st.metric(
+                    f"現行契約一年總金額（{contract_kw_value} kW）",
+                    f"{csum['一年合計']:,.0f} 元",
+                )
+
+            with colR:
+                st.metric(
+                    f"最適契約一年總金額（{best_cap_kw:.0f} kW）",
+                    f"{best_total:,.0f} 元",
+                    delta=f"{saving:,.0f} 元" if saving != 0 else None,
+                )
+
+            if saving > 0:
+                st.success(
+                    f"採用最適契約容量時，每年可節省約 **{saving:,.0f} 元**"
+                    "（基本電費＋超約附加費合計）。"
+                )
+            elif saving < 0:
+                st.warning(
+                    f"採用最適契約容量時，每年將增加約 **{abs(saving):,.0f} 元**"
+                    "（基本電費＋超約附加費合計）。"
+                )
+            else:
+                st.info("最適契約容量與現行契約容量的一年總金額相同。")
+
+            st.caption("※ 試算結果僅供參考，實際金額以台電帳單為準。")
+
+            # ===== 產生 PDF 並提供下載 =====
             pdf_bytes = build_pdf_report(
-                result_df,
-                customer_name=customer_name,
-                meter_no=meter_no,
-                address=address,
-                supply_name=supply_name,
-                contract_kw_current=contract_kw,
+                current_summary=csum,
+                df_curr=df_curr,
+                df_scan=df_scan,
+                best_row=best_row,
+                customer_name=display_customer_name,
+                meter_no=display_meter_no,
+                address=display_address,
+                contract_kw_value=contract_kw_value,
+                pdf_date=calc_date,
             )
 
             st.download_button(
-                label="下載 PDF 報告",
+                label="下載試算結果 PDF",
                 data=pdf_bytes,
-                file_name="契約容量試算報告_Tabs開發版.pdf",
+                file_name=f"契約容量試算_{display_customer_name}.pdf",
                 mime="application/pdf",
             )
 
-
-# ====================== 主程式 ======================
-
-def main():
-    st.set_page_config(
-        page_title="最適契約容量試算 v5.2.1（Tabs 開發版）",
-        layout="wide",
-    )
-
-    if not check_password():
-        st.stop()
-
-    ensure_defaults()
-    apply_global_style()
-
-    st.caption(
-        "📱 提示：此為「開發用 Tabs 版本」。"
-        "上方分頁可切換「基本資料輸入」與「12 個月最大需量輸入」。"
-    )
-
-    st.title("最適契約容量試算 v5.2.1（Tabs 開發版）")
-
-    tab_basic, tab_demand = st.tabs(["基本資料輸入", "12 個月最大需量輸入"])
-
-    with tab_basic:
-        render_basic_form()
-
-    with tab_demand:
-        render_demand_and_result()
-
-
-if __name__ == "__main__":
-    main()
+else:
+    st.info("請先在左側輸入資料，再按下「開始試算」。")
